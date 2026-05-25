@@ -1,0 +1,6 @@
+# Optional: per-institution non-YouTube video platform overrides.
+# Keyed by IPEDS UNITID. Used when commencement video lives on Vimeo, Panopto, etc.
+# Example:
+# 123456:
+#   url: https://vimeo.com/showcase/somecollege-commencement-2026
+#   platform: vimeo

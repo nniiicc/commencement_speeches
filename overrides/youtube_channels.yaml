@@ -1,0 +1,4 @@
+# Optional: per-institution YouTube channel overrides.
+# Keyed by IPEDS UNITID. Seed empty; grow as we hit gaps.
+# Example:
+# 166027: https://www.youtube.com/@harvard
