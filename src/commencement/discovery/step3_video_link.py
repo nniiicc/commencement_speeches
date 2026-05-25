@@ -18,7 +18,6 @@ from commencement.config import CONFIG
 from commencement.db.models import (
     Ceremony,
     Institution,
-    LinkStatus,
     VideoLink,
     VideoPlatform,
 )
@@ -115,6 +114,7 @@ def _platform_from_url(url: str) -> VideoPlatform:
 def discover_video_links(
     ceremony: Ceremony,
     institution: Institution,
+    year: int = CONFIG.PILOT_YEAR,
 ) -> dict:
     institution_name = institution.name
     channel_url = institution.youtube_channel_url
@@ -124,7 +124,7 @@ def discover_video_links(
     if not channel_url and institution.ipeds_id in overrides_yt:
         channel_url = overrides_yt[institution.ipeds_id]
 
-    query = f'"{institution_name}" commencement {CONFIG.PILOT_YEAR}'
+    query = f'"{institution_name}" commencement {year}'
     entries = _ytdlp_search(query, n=10)
 
     log.info(
@@ -195,7 +195,6 @@ def discover_video_links(
             session.add(
                 VideoLink(
                     ceremony_id=ceremony.ceremony_id,
-                    ipeds_id=ceremony.ipeds_id,
                     source_tier=3,
                     platform=c["platform"],
                     url=c["url"],
@@ -205,10 +204,10 @@ def discover_video_links(
                 )
             )
 
+        # 3NF: replaces video_link_status enum. found/not_found derived from
+        # existence of video_links rows; this timestamp records "we attempted."
         cer = session.get(Ceremony, ceremony.ceremony_id)
-        cer.video_link_status = (
-            LinkStatus.found if candidates else LinkStatus.not_found
-        )
+        cer.video_searched_at = dt.datetime.utcnow()
 
         if not institution.youtube_channel_url and candidates:
             best = candidates[0]

@@ -20,6 +20,7 @@ from commencement.common.normalize import (
 from commencement.config import CONFIG
 from commencement.db.models import (
     Ceremony,
+    CeremonySpeaker,
     CeremonyStatus,
     CeremonyType,
     DiscardedCandidate,
@@ -78,6 +79,7 @@ def _candidate_pages_from_search(
     institution_name: str,
     homepage_url: str | None,
     search_provider: SearchProvider,
+    year: int = CONFIG.PILOT_YEAR,
 ) -> list[SearchHit]:
     """Scoped to institution domain first; open search only if scoped is empty.
 
@@ -86,7 +88,7 @@ def _candidate_pages_from_search(
     Open fallback preserves the legitimate third-party-news case (e.g., a
     Senator's office press release announcing the speaker).
     """
-    query = f'"{institution_name}" commencement speaker {CONFIG.PILOT_YEAR}'
+    query = f'"{institution_name}" commencement speaker {year}'
     domain = registered_domain(homepage_url) if homepage_url else None
     if domain:
         scoped = search_provider.search(
@@ -147,17 +149,14 @@ def _record_source_rows(session, pages: list[dict]) -> None:
 
 
 def _upsert_speaker(
-    session, ipeds_id: int, speaker_name: str, speaker_role: str | None
+    session, speaker_name: str, speaker_role: str | None
 ) -> Speaker | None:
+    """Upsert a Speaker keyed by normalized_name. One row per real-world person."""
     if not speaker_name:
         return None
     norm = normalize_name(speaker_name)
     existing = (
-        session.execute(
-            select(Speaker).where(
-                Speaker.normalized_name == norm, Speaker.ipeds_id == ipeds_id
-            )
-        )
+        session.execute(select(Speaker).where(Speaker.normalized_name == norm))
         .scalars()
         .first()
     )
@@ -166,12 +165,12 @@ def _upsert_speaker(
             existing.speaker_role = speaker_role
         return existing
     sp = Speaker(
-        speaker_name=speaker_name,
+        display_name=speaker_name,
         normalized_name=norm,
         speaker_role=speaker_role,
-        ipeds_id=ipeds_id,
     )
     session.add(sp)
+    session.flush()
     return sp
 
 
@@ -179,15 +178,16 @@ def resolve_speaker_for_institution(
     institution: Institution,
     search_provider: SearchProvider,
     blob_store: BlobStore | None = None,
+    year: int = CONFIG.PILOT_YEAR,
 ) -> dict:
     blob_store = blob_store or BlobStore()
     institution_name = institution.name
     ipeds_id = institution.ipeds_id
 
-    log.info("step1: resolving speaker for %s (ipeds_id=%d)", institution_name, ipeds_id)
+    log.info("step1: resolving speaker for %s (ipeds_id=%d, year=%d)", institution_name, ipeds_id, year)
 
     hits = _candidate_pages_from_search(
-        institution_name, institution.homepage_url, search_provider
+        institution_name, institution.homepage_url, search_provider, year=year
     )
     candidate_urls = [h.url for h in hits if h.url]
 
@@ -203,14 +203,14 @@ def resolve_speaker_for_institution(
         log.info("step1: no candidate pages for %s", institution_name)
         extraction = None
     else:
-        extraction = extract_speaker(institution_name, pages_with_text)
+        extraction = extract_speaker(institution_name, pages_with_text, year=year)
 
     with get_session() as session:
         existing = (
             session.execute(
                 select(Ceremony).where(
                     Ceremony.ipeds_id == ipeds_id,
-                    Ceremony.year == CONFIG.PILOT_YEAR,
+                    Ceremony.year == year,
                 )
             )
             .scalars()
@@ -234,7 +234,7 @@ def resolve_speaker_for_institution(
         if existing is None:
             ceremony = Ceremony(
                 ipeds_id=ipeds_id,
-                year=CONFIG.PILOT_YEAR,
+                year=year,
                 ceremony_date=ceremony_date,
                 ceremony_status=ceremony_status,
                 ceremony_type=(
@@ -242,18 +242,11 @@ def resolve_speaker_for_institution(
                     if extraction and extraction.ceremony_type == "universitywide"
                     else CeremonyType.unknown
                 ),
-                speaker_name=extraction.speaker_name if extraction else None,
-                identity_source_url=extraction.source_url if extraction else None,
-                identity_confidence=extraction.confidence if extraction else 0.0,
-                identity_method=_identity_method_for(
-                    extraction, institution.homepage_url
-                )
-                if extraction
-                else IdentityMethod.none,
                 last_discovery_run_at=datetime.utcnow(),
                 notes=extraction.notes if extraction else None,
             )
             session.add(ceremony)
+            session.flush()
         else:
             ceremony = existing
             ceremony.ceremony_date = ceremony_date or ceremony.ceremony_date
@@ -264,20 +257,45 @@ def resolve_speaker_for_institution(
                     if extraction.ceremony_type == "universitywide"
                     else ceremony.ceremony_type
                 )
-                if extraction.confidence > ceremony.identity_confidence:
-                    ceremony.speaker_name = extraction.speaker_name
-                    ceremony.identity_source_url = extraction.source_url
-                    ceremony.identity_confidence = extraction.confidence
-                    ceremony.identity_method = _identity_method_for(
-                        extraction, institution.homepage_url
-                    )
-                    ceremony.notes = extraction.notes
+                ceremony.notes = extraction.notes or ceremony.notes
             ceremony.last_discovery_run_at = datetime.utcnow()
 
+        # Speaker identity → ceremony_speakers + speakers (3NF: identity is a
+        # property of the speaker-at-ceremony link, not the ceremony row).
         if extraction and extraction.speaker_name:
-            _upsert_speaker(
-                session, ipeds_id, extraction.speaker_name, extraction.speaker_role
+            speaker = _upsert_speaker(
+                session, extraction.speaker_name, extraction.speaker_role
             )
+            existing_primary = (
+                session.execute(
+                    select(CeremonySpeaker).where(
+                        CeremonySpeaker.ceremony_id == ceremony.ceremony_id,
+                        CeremonySpeaker.is_primary.is_(True),
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing_primary is None:
+                session.add(CeremonySpeaker(
+                    ceremony_id=ceremony.ceremony_id,
+                    speaker_id=speaker.speaker_id,
+                    is_primary=True,
+                    source_url=extraction.source_url,
+                    identity_method=_identity_method_for(
+                        extraction, institution.homepage_url
+                    ),
+                    identity_confidence=extraction.confidence,
+                    notes=extraction.notes,
+                ))
+            elif extraction.confidence > existing_primary.identity_confidence:
+                existing_primary.speaker_id = speaker.speaker_id
+                existing_primary.source_url = extraction.source_url
+                existing_primary.identity_method = _identity_method_for(
+                    extraction, institution.homepage_url
+                )
+                existing_primary.identity_confidence = extraction.confidence
+                existing_primary.notes = extraction.notes
 
         _record_source_rows(session, pages_with_text)
 

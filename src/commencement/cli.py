@@ -45,21 +45,25 @@ def frame_cmd(reload: bool, sample_size: int, seed: int) -> None:
 )
 @click.option("--ipeds-id", type=int, default=None)
 @click.option("--triggered-by", default="manual")
-def discover_cmd(mode: str, ipeds_id: int | None, triggered_by: str) -> None:
+@click.option("--year", type=int, default=CONFIG.PILOT_YEAR, help="ceremony year to operate on")
+def discover_cmd(mode: str, ipeds_id: int | None, triggered_by: str, year: int) -> None:
     """Run discovery (Steps 1->2->3) for the chosen mode."""
     from commencement.discovery.flow import flow_discovery
 
-    result = flow_discovery(mode=mode, ipeds_id=ipeds_id, triggered_by=triggered_by)
+    result = flow_discovery(
+        mode=mode, ipeds_id=ipeds_id, triggered_by=triggered_by, year=year
+    )
     click.echo(json.dumps(result, indent=2))
 
 
 @cli.command("export")
 @click.option("--version", "-V", type=int, required=True)
-def export_cmd(version: int) -> None:
+@click.option("--year", type=int, default=CONFIG.PILOT_YEAR, help="ceremony year to export")
+def export_cmd(version: int, year: int) -> None:
     """Write a versioned export of ceremonies x links to exports/."""
     from commencement.export import export_corpus
 
-    paths = export_corpus(version=version)
+    paths = export_corpus(version=version, year=year)
     for k, p in paths.items():
         click.echo(f"{k}: {p}")
 

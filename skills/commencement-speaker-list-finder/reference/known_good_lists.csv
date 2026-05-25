@@ -1,0 +1,19 @@
+domain,url,expected_class,expected_shape,notes
+upenn.edu,https://archives.upenn.edu/digitized-resources/docs-pubs/commencement-addresses/,speaker_list,per_year_subpage_index,1897-present; deep links to per-year text
+upenn.edu,https://secretary.upenn.edu/ceremonies/commencement-speakers,speaker_list,table_year_speaker,Office of the University Secretary copy
+syr.edu,https://library.syracuse.edu/special-collections-research-center/university-archives/founding-history/commencement-speakers/,speaker_list,paragraph_bold_year,1893-present
+nd.edu,https://archives.nd.edu/research/facts/commencement.htm,speaker_list,table_year_speaker_role,1844-present with documented gaps
+nd.edu,https://commencement.nd.edu/archives/speakers/,speaker_list,table_year_speaker,Commencement office copy
+ncsu.edu,https://commencement.ncsu.edu/archives/speaker/,speaker_list,table_year_speaker,Honorary degrees 1917-; speakers 1961-
+auburn.edu,https://auburn.edu/academic/provost/commencement/archives/,speaker_list,unknown,Per-ceremony program PDFs
+uncg.edu,https://library.uncg.edu/about-us/library-departments/special-collections-university-archives/university-archives/lists-uncg-history/commencement-speakers/,speaker_list,paragraph_bold_year,1893-present
+tufts.edu,https://trustees.tufts.edu/wp-content/uploads/2023-05-22_Commencement_Speakers-1.pdf,speaker_list,pdf_year_rows,Tufts trustees PDF
+unh.edu,https://www.unh.edu/university-ceremonies-and-events/sites/default/files/media/2023-01/commencement-speaker-historical-list.pdf,speaker_list,pdf_year_rows,1877-
+suffolk.edu,https://dc.suffolk.edu/comm/,speaker_list,unknown,Bepress repository index
+udel.edu,https://sites.udel.edu/uarm/past-commencements-speakers/,speaker_list,paragraph_bold_year,Records Management
+wustl.edu,https://libguides.wustl.edu/wustl-commencement/speakers,speaker_list,table_year_speaker_role,1962-
+princeton.edu,https://universityarchives.princeton.edu/2013/05/name-dropping-a-list-of-famous-commencement-week-speakers-at-princeton/,not_a_list,,Curated blog post not a comprehensive roster
+bestcolleges.com,https://www.bestcolleges.com/news/commencement-speakers-for-2024/,not_a_list,,Third-party annual roundup
+en.wikipedia.org,https://en.wikipedia.org/wiki/History_and_traditions_of_Harvard_commencements,not_a_list,,Wikipedia narrative
+quora.com,https://www.quora.com/Who-are-the-most-famous-people-to-have-delivered-Stanford-Harvard-commencement-speeches,not_a_list,,Q&A thread
+hofstra.edu,https://news.hofstra.edu/2026/04/08/hofstra-university-names-spring-2026-commencement-speakers-and-honorary-degree-recipients/,not_a_list,,Single-year press release

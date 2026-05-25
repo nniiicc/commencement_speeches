@@ -26,7 +26,8 @@ class SpeakerExtraction:
     notes: str | None = None
 
 
-EXTRACTION_SYSTEM_PROMPT = """You extract structured facts about a single university's 2026
+def _extraction_system_prompt(year: int) -> str:
+    return f"""You extract structured facts about a single university's {year}
 universitywide commencement ceremony from a set of candidate web pages.
 
 CRITICAL RULES
@@ -39,12 +40,12 @@ CRITICAL RULES
   release / news page over third-party coverage. Set
   is_official_institution_source accordingly.
 - If you cannot determine a fact, set the field to null and lower confidence.
-- confidence is a 0..1 calibrated estimate of "the universitywide 2026 speaker for
+- confidence is a 0..1 calibrated estimate of "the universitywide {year} speaker for
   this institution is exactly the person I extracted". Bake in your uncertainty.
 
 OUTPUT
 Return ONLY a single JSON object matching this schema, no preamble:
-{
+{{
   "speaker_name": string | null,
   "speaker_role": string | null,
   "ceremony_date": "YYYY-MM-DD" | null,
@@ -53,12 +54,12 @@ Return ONLY a single JSON object matching this schema, no preamble:
   "is_official_institution_source": bool,
   "confidence": number,
   "notes": string | null
-}
+}}
 """
 
 
-def _format_pages(institution_name: str, pages: list[dict]) -> str:
-    body = [f"Institution: {institution_name}", f"Target year: {CONFIG.PILOT_YEAR}\n"]
+def _format_pages(institution_name: str, pages: list[dict], year: int) -> str:
+    body = [f"Institution: {institution_name}", f"Target year: {year}\n"]
     for i, p in enumerate(pages, 1):
         body.append(f"--- PAGE {i} ---")
         body.append(f"URL: {p.get('url', '')}")
@@ -79,6 +80,7 @@ def extract_speaker(
     institution_name: str,
     pages: list[dict],
     model: Optional[str] = None,
+    year: int = CONFIG.PILOT_YEAR,
 ) -> SpeakerExtraction | None:
     if not CONFIG.ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY not set")
@@ -88,13 +90,13 @@ def extract_speaker(
         raise RuntimeError("anthropic SDK is not installed") from e
 
     client = Anthropic(api_key=CONFIG.ANTHROPIC_API_KEY)
-    user_content = _format_pages(institution_name, pages)
+    user_content = _format_pages(institution_name, pages, year)
 
     try:
         resp = client.messages.create(
             model=model or CONFIG.LLM_MODEL_EXTRACTION,
             max_tokens=800,
-            system=EXTRACTION_SYSTEM_PROMPT,
+            system=_extraction_system_prompt(year),
             messages=[{"role": "user", "content": user_content}],
         )
     except Exception as e:

@@ -18,7 +18,6 @@ from commencement.config import CONFIG
 from commencement.db.models import (
     Ceremony,
     Institution,
-    LinkStatus,
     TranscriptKind,
     TranscriptLink,
 )
@@ -46,8 +45,11 @@ def _classify_transcript_kind(url: str) -> TranscriptKind:
     return TranscriptKind.institutional_html
 
 
-def _tier1_searches(institution_name: str, speaker_name: str | None) -> list[str]:
-    year = CONFIG.PILOT_YEAR
+def _tier1_searches(
+    institution_name: str,
+    speaker_name: str | None,
+    year: int = CONFIG.PILOT_YEAR,
+) -> list[str]:
     queries = [
         f'"{institution_name}" commencement {year} transcript',
         f'"{institution_name}" commencement {year} address text',
@@ -88,9 +90,12 @@ def _filter_tier1(
 
 
 def _tier2_search_cspan(
-    institution_name: str, speaker_name: str | None, search_provider: SearchProvider
+    institution_name: str,
+    speaker_name: str | None,
+    search_provider: SearchProvider,
+    year: int = CONFIG.PILOT_YEAR,
 ) -> list[SearchHit]:
-    q = f"site:c-span.org {speaker_name or ''} {institution_name} commencement {CONFIG.PILOT_YEAR}"
+    q = f"site:c-span.org {speaker_name or ''} {institution_name} commencement {year}"
     return search_provider.search(q, max_results=10)
 
 
@@ -119,17 +124,18 @@ def discover_transcript_links(
     ceremony: Ceremony,
     institution: Institution,
     search_provider: SearchProvider,
+    year: int = CONFIG.PILOT_YEAR,
 ) -> dict:
-    if (
-        ceremony.identity_confidence == 0.0
-        and ceremony.ceremony_status.value == "future"
-    ):
+    # Primary speaker's confidence (3NF: lives on the ceremony_speakers row).
+    primary = ceremony.primary_speaker
+    primary_confidence = primary.identity_confidence if primary else 0.0
+    if primary_confidence == 0.0 and ceremony.ceremony_status.value == "future":
         log.info(
             "step2: skipping ceremony %d (unresolved + future)", ceremony.ceremony_id
         )
         return {"ceremony_id": ceremony.ceremony_id, "status": "skipped"}
 
-    speaker = ceremony.speaker_name
+    speaker = ceremony.speaker_name  # backwards-compat property → primary's display_name
     institution_name = institution.name
 
     log.info(
@@ -140,13 +146,13 @@ def discover_transcript_links(
 
     discovered: list[tuple[str, TranscriptKind, int]] = []
 
-    for q in _tier1_searches(institution_name, speaker):
+    for q in _tier1_searches(institution_name, speaker, year=year):
         hits = search_provider.search(q, max_results=10)
         for h in _filter_tier1(hits, institution.homepage_url):
             discovered.append((h.url, _classify_transcript_kind(h.url), 1))
 
     if speaker:
-        for h in _tier2_search_cspan(institution_name, speaker, search_provider):
+        for h in _tier2_search_cspan(institution_name, speaker, search_provider, year=year):
             if "c-span.org" not in h.url:
                 continue
             discovered.append((h.url, TranscriptKind.cspan_page, 2))
@@ -177,7 +183,6 @@ def discover_transcript_links(
             session.add(
                 TranscriptLink(
                     ceremony_id=ceremony.ceremony_id,
-                    ipeds_id=ceremony.ipeds_id,
                     source_tier=tier,
                     source_kind=kind,
                     url=url,
@@ -185,10 +190,11 @@ def discover_transcript_links(
                 )
             )
 
+        # 3NF: replaces transcript_link_status enum. found/not_found is derived
+        # from the existence of transcript_links rows; the timestamp records
+        # "we attempted Step 2 at this time."
         cer = session.get(Ceremony, ceremony.ceremony_id)
-        cer.transcript_link_status = (
-            LinkStatus.found if deduped else LinkStatus.not_found
-        )
+        cer.transcript_searched_at = datetime.utcnow()
 
     return {
         "ceremony_id": ceremony.ceremony_id,

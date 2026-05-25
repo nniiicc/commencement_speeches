@@ -13,15 +13,17 @@ from datetime import datetime
 from typing import Iterable
 
 from prefect import flow, get_run_logger, task
-from sqlalchemy import or_, select
+from sqlalchemy import and_, exists, or_, select
 
 from commencement.config import CONFIG
 from commencement.db.models import (
     Ceremony,
+    CeremonySpeaker,
     CeremonyStatus,
     DiscoveryRun,
     Institution,
-    LinkStatus,
+    TranscriptLink,
+    VideoLink,
 )
 from commencement.db.session import get_session
 from commencement.discovery.step1_speaker import resolve_speaker_for_institution
@@ -36,7 +38,7 @@ log = logging.getLogger(__name__)
 VALID_MODES = {"initial", "catch-late", "future", "institution"}
 
 
-def _select_targets(mode: str, ipeds_id: int | None) -> list[int]:
+def _select_targets(mode: str, ipeds_id: int | None, year: int) -> list[int]:
     with get_session() as session:
         if mode == "institution":
             if ipeds_id is None:
@@ -54,25 +56,41 @@ def _select_targets(mode: str, ipeds_id: int | None) -> list[int]:
                 .join(Ceremony, Ceremony.ipeds_id == Institution.ipeds_id)
                 .where(
                     Institution.in_pilot.is_(True),
-                    Ceremony.year == CONFIG.PILOT_YEAR,
+                    Ceremony.year == year,
                     Ceremony.ceremony_status == CeremonyStatus.future,
                 )
             )
             return [r[0] for r in session.execute(stmt).all()]
 
         if mode == "catch-late":
+            # Catch-late picks up past ceremonies where any of:
+            #   - the primary speaker was identified with confidence < 0.5
+            #   - we searched for a transcript and found none
+            #     (transcript_searched_at IS NOT NULL AND no transcript_links rows)
+            #   - same for video
+            primary_low_conf = exists().where(
+                and_(
+                    CeremonySpeaker.ceremony_id == Ceremony.ceremony_id,
+                    CeremonySpeaker.is_primary.is_(True),
+                    CeremonySpeaker.identity_confidence < 0.5,
+                )
+            )
+            transcript_not_found = and_(
+                Ceremony.transcript_searched_at.is_not(None),
+                ~exists().where(TranscriptLink.ceremony_id == Ceremony.ceremony_id),
+            )
+            video_not_found = and_(
+                Ceremony.video_searched_at.is_not(None),
+                ~exists().where(VideoLink.ceremony_id == Ceremony.ceremony_id),
+            )
             stmt = (
                 select(Institution.ipeds_id)
                 .join(Ceremony, Ceremony.ipeds_id == Institution.ipeds_id)
                 .where(
                     Institution.in_pilot.is_(True),
-                    Ceremony.year == CONFIG.PILOT_YEAR,
+                    Ceremony.year == year,
                     Ceremony.ceremony_status == CeremonyStatus.past,
-                    or_(
-                        Ceremony.identity_confidence < 0.5,
-                        Ceremony.transcript_link_status == LinkStatus.not_found,
-                        Ceremony.video_link_status == LinkStatus.not_found,
-                    ),
+                    or_(primary_low_conf, transcript_not_found, video_not_found),
                 )
             )
             return [r[0] for r in session.execute(stmt).all()]
@@ -89,12 +107,12 @@ def _load_institution(ipeds_id: int) -> Institution | None:
         return inst
 
 
-def _load_ceremony(ipeds_id: int) -> Ceremony | None:
+def _load_ceremony(ipeds_id: int, year: int) -> Ceremony | None:
     with get_session() as session:
         cer = (
             session.execute(
                 select(Ceremony).where(
-                    Ceremony.ipeds_id == ipeds_id, Ceremony.year == CONFIG.PILOT_YEAR
+                    Ceremony.ipeds_id == ipeds_id, Ceremony.year == year
                 )
             )
             .scalars()
@@ -107,7 +125,7 @@ def _load_ceremony(ipeds_id: int) -> Ceremony | None:
 
 
 @task(name="discover-institution")
-def _discover_institution(ipeds_id: int) -> dict:
+def _discover_institution(ipeds_id: int, year: int) -> dict:
     inst = _load_institution(ipeds_id)
     if inst is None:
         return {"ipeds_id": ipeds_id, "status": "missing_institution"}
@@ -115,16 +133,16 @@ def _discover_institution(ipeds_id: int) -> dict:
     provider = get_search_provider()
     blob_store = BlobStore()
 
-    step1 = resolve_speaker_for_institution(inst, provider, blob_store)
+    step1 = resolve_speaker_for_institution(inst, provider, blob_store, year=year)
     if step1.get("status") == "discarded_per_college":
         return step1
 
-    cer = _load_ceremony(ipeds_id)
+    cer = _load_ceremony(ipeds_id, year)
     if cer is None:
         return {"ipeds_id": ipeds_id, "status": "no_ceremony_after_step1"}
 
-    step2 = discover_transcript_links(cer, inst, provider)
-    step3 = discover_video_links(cer, inst)
+    step2 = discover_transcript_links(cer, inst, provider, year=year)
+    step3 = discover_video_links(cer, inst, year=year)
 
     return {
         "ipeds_id": ipeds_id,
@@ -140,12 +158,13 @@ def flow_discovery(
     mode: str = "initial",
     ipeds_id: int | None = None,
     triggered_by: str = "manual",
+    year: int = CONFIG.PILOT_YEAR,
 ) -> dict:
     rlog = get_run_logger()
     if mode not in VALID_MODES:
         raise ValueError(f"mode must be one of {VALID_MODES}, got {mode}")
 
-    targets = _select_targets(mode, ipeds_id)
+    targets = _select_targets(mode, ipeds_id, year)
     rlog.info("discovery mode=%s targets=%d", mode, len(targets))
 
     with get_session() as session:
@@ -163,7 +182,7 @@ def flow_discovery(
     results: list[dict] = []
     for tid in targets:
         try:
-            results.append(_discover_institution.fn(tid))
+            results.append(_discover_institution.fn(tid, year))
         except Exception as e:
             rlog.warning("discovery failed for ipeds_id=%d: %s", tid, e)
             results.append({"ipeds_id": tid, "status": "error", "error": str(e)})

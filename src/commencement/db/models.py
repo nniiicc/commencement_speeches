@@ -114,18 +114,12 @@ class Ceremony(Base):
     ceremony_type: Mapped[CeremonyType] = mapped_column(
         Enum(CeremonyType), default=CeremonyType.unknown
     )
-    speaker_name: Mapped[Optional[str]] = mapped_column(String(256))
-    identity_source_url: Mapped[Optional[str]] = mapped_column(String(1024))
-    identity_confidence: Mapped[float] = mapped_column(Float, default=0.0)
-    identity_method: Mapped[IdentityMethod] = mapped_column(
-        Enum(IdentityMethod), default=IdentityMethod.none
-    )
-    transcript_link_status: Mapped[LinkStatus] = mapped_column(
-        Enum(LinkStatus), default=LinkStatus.not_searched
-    )
-    video_link_status: Mapped[LinkStatus] = mapped_column(
-        Enum(LinkStatus), default=LinkStatus.not_searched
-    )
+    # 3NF: speaker identity moved to ceremony_speakers (with FK to speakers).
+    # Status enums replaced by "when did we last attempt" timestamps; the
+    # tri-state {not_searched, not_found, found} is derived from
+    # (searched_at, has_child_rows).
+    transcript_searched_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    video_searched_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     last_discovery_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     notes: Mapped[Optional[str]] = mapped_column(Text)
 
@@ -136,25 +130,51 @@ class Ceremony(Base):
     video_links: Mapped[list["VideoLink"]] = relationship(
         back_populates="ceremony", cascade="all, delete-orphan"
     )
-    school_speakers: Mapped[list["CeremonySpeaker"]] = relationship(
+    ceremony_speakers: Mapped[list["CeremonySpeaker"]] = relationship(
         back_populates="ceremony", cascade="all, delete-orphan"
     )
 
+    @property
+    def transcript_link_status(self) -> LinkStatus:
+        if self.transcript_searched_at is None:
+            return LinkStatus.not_searched
+        return LinkStatus.found if self.transcript_links else LinkStatus.not_found
+
+    @property
+    def video_link_status(self) -> LinkStatus:
+        if self.video_searched_at is None:
+            return LinkStatus.not_searched
+        return LinkStatus.found if self.video_links else LinkStatus.not_found
+
+    @property
+    def primary_speaker(self) -> Optional["CeremonySpeaker"]:
+        return next((cs for cs in self.ceremony_speakers if cs.is_primary), None)
+
+    @property
+    def speaker_name(self) -> Optional[str]:
+        """Backwards-compat: returns the primary speaker's display name."""
+        ps = self.primary_speaker
+        return ps.speaker.display_name if ps and ps.speaker else None
+
 
 class CeremonySpeaker(Base):
-    """One row per named speaker when a ceremony has multiple school-level speakers.
-
-    Used when `Ceremony.ceremony_type == school_level_only`. Each row records who
-    spoke at which sub-ceremony (school/college name + ceremony label).
-    """
+    """One row per (ceremony, speaker) pair. `is_primary=True` for the
+    universitywide-equivalent keynote; other rows model school-level speakers
+    at multi-college ceremonies."""
 
     __tablename__ = "ceremony_speakers"
+    __table_args__ = (
+        UniqueConstraint("ceremony_id", "speaker_id", name="uq_ceremony_speaker"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     ceremony_id: Mapped[int] = mapped_column(
         ForeignKey("ceremonies.ceremony_id"), index=True
     )
-    speaker_name: Mapped[str] = mapped_column(String(256))
+    speaker_id: Mapped[int] = mapped_column(
+        ForeignKey("speakers.speaker_id"), index=True
+    )
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
     school_or_college: Mapped[Optional[str]] = mapped_column(String(256))
     ceremony_label: Mapped[Optional[str]] = mapped_column(String(256))
     source_url: Mapped[Optional[str]] = mapped_column(String(1024))
@@ -165,35 +185,40 @@ class CeremonySpeaker(Base):
     notes: Mapped[Optional[str]] = mapped_column(Text)
     discovered_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-    ceremony: Mapped[Ceremony] = relationship(back_populates="school_speakers")
+    ceremony: Mapped[Ceremony] = relationship(back_populates="ceremony_speakers")
+    speaker: Mapped["Speaker"] = relationship(back_populates="ceremony_speakers")
 
 
 class Speaker(Base):
+    """A person who has delivered (or is announced to deliver) a commencement
+    address. Keyed by `normalized_name` — a speaker is a person, not coupled
+    to any institution."""
+
     __tablename__ = "speakers"
-    __table_args__ = (
-        UniqueConstraint("normalized_name", "ipeds_id", name="uq_speaker_inst"),
-    )
 
     speaker_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    speaker_name: Mapped[str] = mapped_column(String(256))
-    normalized_name: Mapped[str] = mapped_column(String(256), index=True)
+    normalized_name: Mapped[str] = mapped_column(String(256), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(256))
     speaker_role: Mapped[Optional[str]] = mapped_column(String(512))
     affiliation: Mapped[Optional[str]] = mapped_column(String(512))
     bio_url: Mapped[Optional[str]] = mapped_column(String(1024))
     wikidata_qid: Mapped[Optional[str]] = mapped_column(String(32))
-    ipeds_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("institutions.ipeds_id"), index=True
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    ceremony_speakers: Mapped[list["CeremonySpeaker"]] = relationship(
+        back_populates="speaker"
     )
 
 
 class TranscriptLink(Base):
+    """3NF: `ipeds_id` removed — derivable via `ceremony_id → ceremonies.ipeds_id`."""
+
     __tablename__ = "transcript_links"
 
     transcript_link_id: Mapped[int] = mapped_column(
         Integer, primary_key=True, autoincrement=True
     )
     ceremony_id: Mapped[int] = mapped_column(ForeignKey("ceremonies.ceremony_id"), index=True)
-    ipeds_id: Mapped[int] = mapped_column(Integer, index=True)
     source_tier: Mapped[int] = mapped_column(Integer)
     source_kind: Mapped[TranscriptKind] = mapped_column(Enum(TranscriptKind))
     url: Mapped[str] = mapped_column(String(1024))
@@ -207,11 +232,12 @@ class TranscriptLink(Base):
 
 
 class VideoLink(Base):
+    """3NF: `ipeds_id` removed — derivable via `ceremony_id → ceremonies.ipeds_id`."""
+
     __tablename__ = "video_links"
 
     video_link_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     ceremony_id: Mapped[int] = mapped_column(ForeignKey("ceremonies.ceremony_id"), index=True)
-    ipeds_id: Mapped[int] = mapped_column(Integer, index=True)
     source_tier: Mapped[int] = mapped_column(Integer, default=3)
     platform: Mapped[VideoPlatform] = mapped_column(Enum(VideoPlatform))
     url: Mapped[str] = mapped_column(String(1024))
