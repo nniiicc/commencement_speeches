@@ -1,3 +1,3 @@
-# Commencement Speech Corpus (2026 Pilot)
+# Commencement Speech Corpus 
 
-Pipeline for discovering 2026 universitywide commencement speakers, transcript links, and video links across a stratified sample of US degree-granting Title IV institutions.
+Pipeline for discovering university commencement speakers, transcript links, and video links across a stratified sample of US degree-granting Title IV institutions.
